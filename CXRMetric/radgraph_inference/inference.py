@@ -6,84 +6,128 @@ import pandas as pd
 import re
 from tqdm import tqdm
 import argparse
+import subprocess
+import sys
 
 """Code adapted from https://physionet.org/content/radgraph/1.0.0: models/inference.py."""
 
-def preprocess_reports(data_path, start, end, sentence=False, image=False):
-    """ Load up the files mentioned in the temporary json file, and
-    processes them in format that the dygie model can take as input.
-    Also save the processed file in a temporary file.
-    """
-    impressions = pd.read_csv(data_path)
-    if start != None and end != None:
-        impressions = impressions.iloc[start:end]
-    final_list = []
-    for idx, row in impressions.iterrows():
-        if (isinstance(row["report"], float) and math.isnan(row["report"])): continue
-        sen = re.sub('(?<! )(?=[/,-,:,.,!?()])|(?<=[/,-,:,.,!?()])(?! )', r' ', row["report"]).split()
-        temp_dict = {}
+# Add DyGIE to Python path
+dygie_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'dygie')
+sys.path.append(dygie_path)
 
-        if not sentence:  # Report-level
-            if image:  # Different image can have different reports
-                temp_dict["doc_key"] = f"{row['dicom_id']}_{row['study_id']}"
-            else:
-                temp_dict["doc_key"] = str(row["study_id"])
-        else:  # Sentence-level
-            temp_dict["doc_key"] = f"{row['study_id']}_{row['sentence_id']}"
-        
-        ## Current way of inference takes in the whole report as 1 sentence
-        temp_dict["sentences"] = [sen]
-
-        final_list.append(temp_dict)
-
-        if(idx % 1000 == 0):
-            print(f"{idx+1} reports done")
-    
-    print(f"{idx+1} reports done")
-    
-    with open("./temp_dygie_input.json",'w') as outfile:
-        for item in final_list:
-            json.dump(item, outfile)
-            outfile.write("\n")
-
-def run_inference(model_path, cuda):
-    
-    """ Runs the inference on the processed input files. Saves the result in a
-    temporary output file
+def preprocess_reports(data_path, start=None, end=None):
+    """Preprocesses reports for RadGraph.
     
     Args:
-        model_path: Path to the model checkpoint
-        cuda: GPU id
-    
-    
+        data_path: Path to CSV file containing reports
+        start: Start index (optional)
+        end: End index (optional)
     """
-    out_path = "./temp_dygie_output.json"
-    data_path = "./temp_dygie_input.json"
+    # Read the CSV file
+    df = pd.read_csv(data_path)
     
-    os.system(f"allennlp predict {model_path} {data_path} \
-            --predictor dygie --include-package dygie \
-            --use-dataset-reader \
-            --output-file {out_path} \
-            --cuda-device {cuda} \
-            --silent")
-
-def postprocess_reports(data_source, data_split):
+    # If start/end not provided, process all reports
+    if start is None:
+        start = 0
+    if end is None:
+        end = len(df)
     
-    """Post processes all the reports and saves the result in train.json format
-    """
-    final_dict = {}
+    # Process reports
+    processed_data = []
+    for idx in range(start, end):
+        row = df.iloc[idx]
+        doc = {
+            "doc_key": str(row["study_id"]),
+            "sentences": [row["report"].split()],
+            "ner": [[]], 
+            "relations": [[]]
+        }
+        processed_data.append(doc)
+    
+    # Save to temporary file
+    temp_input = os.path.join(os.path.dirname(data_path), 'temp_input.json')
+    with open(temp_input, 'w') as f:
+        for doc in processed_data:
+            f.write(json.dumps(doc) + '\n')
+    
+    return temp_input
 
-    file_name = f"./temp_dygie_output.json"
-    data = []
+def run_inference(model_path, data_source, output_file):
+    """Runs RadGraph inference."""
+    # Ensure model path exists
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
+    
+    # Run allennlp predict with explicit path to dygie
+    cmd = [
+        "allennlp",
+        "predict",
+        model_path,
+        data_source,
+        "--predictor",
+        "dygie",
+        "--include-package",
+        "dygie",
+        "--use-dataset-reader",
+        "--output-file",
+        output_file,
+        "--cuda-device",
+        "-1",
+        "--silent",
+        "--batch-size",
+        "1"
+    ]
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=dict(
+                os.environ,
+                PYTHONPATH=f"{dygie_path}:{os.environ.get('PYTHONPATH', '')}"
+            )
+        )
+        if result.returncode != 0:
+            print("Error running allennlp:", result.stderr)
+            raise RuntimeError("RadGraph inference failed")
+        print("AllennNLP output:", result.stdout)
+    except Exception as e:
+        print(f"Exception running allennlp: {str(e)}")
+        raise
+    
+    # Verify the output file exists and has content
+    if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+        raise RuntimeError("RadGraph inference produced no output")
+    
+    return output_file
 
-    with open(file_name,'r') as f:
+def postprocess_reports(data_source, data_split, output_file):
+    """Post-processes the RadGraph output."""
+    if not os.path.exists(output_file):
+        raise FileNotFoundError(f"RadGraph output file not found: {output_file}")
+        
+    # Read the file line by line since it contains one JSON object per line
+    predictions = {}
+    with open(output_file, 'r') as f:
         for line in f:
-            data.append(json.loads(line))
-
-    for file in data:
-        postprocess_individual_report(file, final_dict, data_source=data_source, data_split=data_split)
+            try:
+                # Parse each line as a separate JSON object
+                pred = json.loads(line.strip())
+                if 'doc_key' in pred:
+                    doc_key = pred['doc_key']
+                    predictions[doc_key] = {
+                        'entities': pred.get('predicted_ner', []),
+                        'relations': pred.get('predicted_relations', [])
+                    }
+            except json.JSONDecodeError as e:
+                print(f"Warning: Could not parse line in output file: {e}")
+                continue
     
-    return final_dict
+    if not predictions:
+        raise ValueError("No valid predictions found in output file")
+        
+    return predictions
 
 def postprocess_individual_report(file, final_dict, data_source=None, data_split="inference"):
     

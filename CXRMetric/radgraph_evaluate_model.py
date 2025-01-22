@@ -31,55 +31,40 @@ def compute_f1(test, retrieved):
             if precision + recall != 0 else 0
     return f1
 
-def generate_radgraph(model_path, raw_path, output_path, cuda=0,
-                      start=None, end=None,
-                      sentence=False, image=False,
-                      data_source="MIMIC-CXR", data_split="metric-oracle"):
-    """Generates RadGraph entities and relations from reports.
-
-    Assumes that the CSV at `raw_path` has a "report" column with reports and
-    a "study_id" column (along with a "sentence_id" column if `sentence` is
-    True and a "dicom_id" column if `image` is True).
-
-    Code adapted from
-        https://physionet.org/content/radgraph/1.0.0: models/inference.py.
-    Requires dependencies and dygie/ from
-        https://github.com/dwadden/dygiepp.git.
-    Requires model checkpoint.
-
-    Args:
-      model_path: Path to RadGraph model checkpoint.
-      raw_path: Path to CSV of reports.
-      output_path: Path to output JSON RadGraph entities and relations.
-      start: Start of range of reports to compute.
-      end: End of range of reports to compute (exclusive).
-      cuda: ID of GPU device.
-      data_source: Tag of data source.
-      data_split: Tag of data split.
-      sentence: Whether to generate RadGraph objects for individual sentences,
-          which are distinguished by study_id and sentence_id.
-      image: Whether to generate RadGraph objects for individual DICOM images,
-          which are distinguished by dicom_id.
-    """
-    print("Preprocessing all the reports...")
-    inference.preprocess_reports(
-            raw_path, start, end, sentence=sentence, image=image)
-    print("Done with preprocessing.")
-
-    print("Running the inference now... This can take a bit of time")
-    inference.run_inference(model_path, cuda)
-    print("Inference completed.")
-
-    print("Postprocessing output file...")
-    final_dict = inference.postprocess_reports(data_source, data_split)
-    print("Done postprocessing.")
-
-    print("Saving results and performing final cleanup...")
-    inference.cleanup()
-
-    with open(output_path, "w") as outfile:
-        json.dump(final_dict, outfile)
-
+def generate_radgraph(model_path, data_path, out_path):
+    """Generates RadGraph predictions."""
+    # Create temp directory if it doesn't exist
+    os.makedirs('temp', exist_ok=True)
+    
+    # Set absolute paths
+    temp_output = os.path.join(os.path.dirname(out_path), 'temp_dygie_output.json')
+    
+    # Run inference with correct paths
+    data_source = inference.preprocess_reports(data_path)
+    data_split = inference.run_inference(model_path, data_source, temp_output)
+    
+    # Process predictions and save to separate files
+    predictions = inference.postprocess_reports(data_source, data_split, temp_output)
+    
+    # Split predictions into entities and relations
+    entities_dict = {}
+    relations_dict = {}
+    
+    for doc_key, pred in predictions.items():
+        entities_dict[doc_key] = pred['entities']
+        relations_dict[doc_key] = pred['relations']
+    
+    # Save entities and relations to separate files
+    entities_path = os.path.join(os.path.dirname(out_path), 'entities_cache.json')
+    relations_path = os.path.join(os.path.dirname(out_path), 'relations_cache.json')
+    
+    with open(entities_path, 'w') as f:
+        json.dump(entities_dict, f)
+    
+    with open(relations_path, 'w') as f:
+        json.dump(relations_dict, f)
+    
+    return entities_path, relations_path
 
 def parse_entity_relation(path):
     """Parses entities and relations from RadGraph outputs.
@@ -281,27 +266,39 @@ def compute_CI(entity_output_path, relation_output_path, bootstrap_k=5000,
     _compute_CI(relation_output_path, "Relation", bootstrap_k=bootstrap_k,
                 level=level)
 
-def run_radgraph(gt_path, pred_path, out_dir, radgraph_model_checkpoint,
-                 out_entities_path, out_relations_path):
-    """Takes ground-truth and predicted reports and generate RadGraph objects.
-
-    Assumes that the reports are put into CSVs at `gt_path` and `pred_path` at
-    a column named "report". Assumes that the reports have a corresponding
-    column named "study_id".
-
-    Args:
-      gt_path: Path to ground-truth report CSV.
-      pred_path: Path to predicted report report CSV.
-      out_dir: Output directory for RadGraph entities and relations.
-      radgraph_model_checkpoint: Path to RadGraph model checkpoint.
-    """
-    gt_out_path = os.path.join(out_dir, "gt_cache.json")
-    pred_out_path = os.path.join(out_dir, "pred_cache.json")
-
-    # get entities and relations for ground truth
-    generate_radgraph(radgraph_model_checkpoint, gt_path, gt_out_path)
-    generate_radgraph(radgraph_model_checkpoint, pred_path, pred_out_path)
-
-    # get entities and relations for predicted BASED on ground truth
-    evaluate_radgraph(gt_out_path, pred_out_path,
-                      out_entities_path, out_relations_path)
+def run_radgraph(gt_path, pred_path, cache_path, model_path, entities_path, relations_path):
+    """Runs RadGraph evaluation."""
+    # Create cache directory if it doesn't exist
+    os.makedirs(cache_path, exist_ok=True)
+    
+    print("Generating RadGraph predictions for ground truth...")
+    gt_entities_path, gt_relations_path = generate_radgraph(model_path, gt_path, os.path.join(cache_path, "gt_radgraph.json"))
+    
+    print("Generating RadGraph predictions for predictions...")
+    pred_entities_path, pred_relations_path = generate_radgraph(model_path, pred_path, os.path.join(cache_path, "pred_radgraph.json"))
+    
+    # Copy final results to expected locations
+    with open(gt_entities_path) as f:
+        gt_entities = json.load(f)
+    with open(pred_entities_path) as f:
+        pred_entities = json.load(f)
+        
+    with open(gt_relations_path) as f:
+        gt_relations = json.load(f)
+    with open(pred_relations_path) as f:
+        pred_relations = json.load(f)
+    
+    # Save final results
+    with open(entities_path, 'w') as f:
+        json.dump({
+            'gt': gt_entities,
+            'pred': pred_entities
+        }, f)
+        
+    with open(relations_path, 'w') as f:
+        json.dump({
+            'gt': gt_relations,
+            'pred': pred_relations
+        }, f)
+    
+    return entities_path, relations_path

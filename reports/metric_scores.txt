@@ -1,0 +1,4 @@
+,index,study_id,report,bleu_score,bertscore,semb_score,radgraph_combined,RadCliQ-v0,RadCliQ-v1
+0,0,1,Chest x-ray demonstrates clear lung fields. Cardiac silhouette is normal.,0.2348172712620745,0.6505896,0.9355189800262451,0.0,1.9730677503427438,0.4454924926326257
+1,1,2,Right-sided pleural effusion noted. No evidence of pneumothorax.,0.2712487571110483,0.619436,0.9961752891540527,0.0,1.9792128220866185,0.4365830209282628
+2,2,3,Lungs are clear. No acute cardiopulmonary findings.,0.45643546458763845,0.63342553,0.998022735118866,0.5,1.2713412500825632,-0.21095744533851976

@@ -12,6 +12,8 @@ from collections import OrderedDict
 from datasets.unlabeled_dataset import UnlabeledDataset
 from constants import *
 from tqdm import tqdm
+from models.bert_labeler import bert_labeler
+from torch.utils.data import DataLoader
 
 def collate_fn_no_labels(sample_list):
     """Custom collate function to pad reports in each batch to the max len,
@@ -112,21 +114,85 @@ def label(checkpoint_path, csv_path, filename="data.pt", logits=False): # TODO: 
     #    model.train()
     torch.save(rep, filename) #torch.save(rep, 'data.pt') # TODO: CHECK WITH VISH
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Label a csv file containing radiology reports')
-    parser.add_argument('-d', '--data', type=str, nargs='?', required=True,
-                        help='path to csv containing reports. The reports should be \
-                              under the \"Report Impression\" column')
-    parser.add_argument('-o', '--output_dir', type=str, nargs='?', required=False, default="data.pt", # TODO: CHECK WITH VISH
-                        help='path to intended output file')
-    parser.add_argument('-c', '--checkpoint', type=str, nargs='?', required=True,
-                        help='path to the pytorch checkpoint')
-    parser.add_argument('-l', '--logits', type=bool, nargs='?', required=False, default=False, help="get logits")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-c', '--checkpoint', required=True, help="Path to model checkpoint")
+    parser.add_argument('-d', '--data', required=True, help="Path to data csv file")
+    parser.add_argument('-o', '--output', required=True, help="Path to output embeddings")
     args = parser.parse_args()
-    csv_path = args.data
-    out_path = args.output_dir
-    do_logits = args.logits
-    checkpoint_path = args.checkpoint
 
-    label(checkpoint_path, csv_path, out_path, do_logits)
-    #save_preds(y_pred, csv_path, out_path)
+    # Initialize tokenizer
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    
+    # Create dataset and dataloader
+    dataset = UnlabeledDataset(args.data, "report")
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
+
+    # Load model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = bert_labeler().to(device)
+    
+    # Load checkpoint
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
+        
+    # Remove 'module.' prefix if it exists
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('module.'):
+            new_state_dict[k[7:]] = v
+        else:
+            new_state_dict[k] = v
+            
+    # Load state dict with strict=False
+    model.load_state_dict(new_state_dict, strict=False)
+    model.eval()
+
+    # Get embeddings
+    embeddings = {}
+    with torch.no_grad():
+        for i, report in enumerate(dataloader):
+            # Tokenize the input
+            encoded = tokenizer(
+                report[0],
+                padding=True,
+                truncation=True,
+                max_length=512,
+                return_tensors='pt'
+            )
+            
+            # Move to device and combine inputs
+            input_tensor = encoded['input_ids'].to(device)
+            attention_tensor = encoded['attention_mask'].to(device)
+            
+            # Get model output
+            try:
+                output = model(input_tensor, attention_tensor)
+                
+                # Handle different output types
+                if isinstance(output, torch.Tensor):
+                    embeddings[i] = output.detach()
+                elif isinstance(output, list):
+                    if all(isinstance(x, torch.Tensor) for x in output):
+                        # If list of tensors, concatenate them
+                        embeddings[i] = torch.cat([x.detach() for x in output], dim=-1)
+                    else:
+                        # If list of other types, convert to tensor
+                        embeddings[i] = torch.tensor(output, device=device).detach()
+                else:
+                    print(f"Unexpected output type: {type(output)}")
+                    continue
+                    
+            except Exception as e:
+                print(f"Error processing report {i}: {str(e)}")
+                continue
+
+    # Save embeddings
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    torch.save(embeddings, args.output)
+
+if __name__ == "__main__":
+    main()

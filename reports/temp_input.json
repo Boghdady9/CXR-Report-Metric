@@ -1,0 +1,3 @@
+{"doc_key": "1", "sentences": [["Chest", "x-ray", "demonstrates", "clear", "lung", "fields.", "Cardiac", "silhouette", "is", "normal."]], "ner": [[]], "relations": [[]]}
+{"doc_key": "2", "sentences": [["Right-sided", "pleural", "effusion", "noted.", "No", "evidence", "of", "pneumothorax."]], "ner": [[]], "relations": [[]]}
+{"doc_key": "3", "sentences": [["Lungs", "are", "clear.", "No", "acute", "cardiopulmonary", "findings."]], "ner": [[]], "relations": [[]]}
